@@ -1,0 +1,17 @@
+[project]
+name = "eval-driven-development-langsmith"
+version = "0.1.0"
+description = "Companion notebooks for the Evaluation-Driven Development with LangSmith workshop"
+requires-python = ">=3.11"
+dependencies = [
+  "langchain>=1.0",
+  "langchain-core",
+  "langchain-anthropic",
+  "langsmith>=0.4",
+  "python-dotenv",
+  "jupyterlab>=4",
+  "ipykernel",
+]
+
+[tool.uv]
+package = false
