@@ -1,18 +1,30 @@
-"""Shared eval plumbing for the notebooks and the Checks.
+"""Shared eval plumbing for the notebooks, the CI script and the Checks.
 
 Naming, listing experiments, and averaging feedback are not what anyone is
 here to learn, so they live here rather than in every notebook.
 """
 
+import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
 
 from langsmith import Client
+
+DATASET_TAG = "v1"
+BASELINE_FILE = Path(__file__).resolve().parents[1] / "ci" / "baseline.json"
+GATE_KEYS = ("groundedness", "tool_selection")
 
 
 def dataset_name():
     """Dataset name, per project label, so a shared workspace never collides."""
-    return f"order-support-{os.environ.get('WORKSHOP_SFX', 'local')}"
+    return f"internal-assistant-{os.environ.get('WORKSHOP_SFX', 'local')}"
+
+
+def pinned_examples(client):
+    """The examples of the dataset version tagged DATASET_TAG, so every run scores the same questions."""
+    return list(client.list_examples(dataset_name=dataset_name(), as_of=DATASET_TAG))
 
 
 def experiments(client, dataset_id, prefix=""):
@@ -55,10 +67,8 @@ def compare(prefixes=("",), keys=None):
         print(f"{name:<{width}}  {n:>4}  {cells}")
 
 
-def failure_modes(prefix="trajectory"):
+def failure_modes(prefix="v1-baseline"):
     """Error analysis: list the newest `prefix` experiment's failing rows and count them by cause."""
-    from collections import Counter
-
     client = Client()
     ds = client.read_dataset(dataset_name=dataset_name())
     exps = experiments(client, ds.id, prefix)
@@ -67,32 +77,57 @@ def failure_modes(prefix="trajectory"):
         return
     exp = exps[-1]
     examples = {e.id: e for e in client.list_examples(dataset_id=ds.id)}
+    runs = [r for r in client.list_runs(project_name=exp.name, is_root=True) if r.outputs]
+    scores = defaultdict(dict)
+    for fb in client.list_feedback(run_ids=[r.id for r in runs]):
+        if fb.score is not None:
+            scores[fb.run_id][fb.key] = fb.score
     rows = []
-    for run in client.list_runs(project_name=exp.name, is_root=True):
+    for run in runs:
         ex = examples.get(run.reference_example_id)
-        if ex is None or not run.outputs:
+        if ex is None:
             continue
         expected, actual = ex.outputs["trajectory"], run.outputs.get("trajectory", [])
-        if actual == expected:
-            continue
-        missing = Counter(expected) - Counter(actual)
-        extra = Counter(actual) - Counter(expected)
-        if missing:
-            cause = "skipped " + ", ".join(sorted(missing))
-        elif extra:
-            cause = "extra " + ", ".join(sorted(extra))
-        else:
-            cause = "wrong order"
-        rows.append((ex.inputs["query"], expected, actual, cause))
+        causes = []
+        if scores[run.id].get("groundedness") == 0:
+            causes.append("ungrounded answer")
+        for tool in sorted(set(expected) - set(actual)):
+            causes.append(f"skipped {tool}")
+        for tool in sorted(set(actual) - set(expected)):
+            causes.append(f"extra {tool}")
+        if causes:
+            rows.append((ex.inputs["query"], expected, actual, causes))
     print(f"{exp.name}: {len(rows)} failing row(s)\n")
     if not rows:
-        print("No failing rows: every trajectory matched.")
+        print("No failing rows: every answer was grounded and every tool choice matched.")
         return
-    for query, expected, actual, cause in rows:
-        print(f"query   : {query}")
+    for query, expected, actual, causes in rows:
+        print(f"question: {query}")
         print(f"expected: {expected}")
         print(f"actual  : {actual}")
-        print(f"cause   : {cause}\n")
+        print(f"causes  : {', '.join(causes)}\n")
     print("Failures by cause (largest first):")
-    for cause, n in Counter(r[3] for r in rows).most_common():
+    for cause, n in Counter(c for r in rows for c in r[3]).most_common():
         print(f"  {n}  {cause}")
+
+
+def write_baseline(prefix="v2-fixed"):
+    """Record the newest `prefix` experiment's scores as the baseline the CI gate compares against."""
+    client = Client()
+    ds = client.read_dataset(dataset_name=dataset_name())
+    exps = experiments(client, ds.id, prefix)
+    if not exps:
+        raise SystemExit(f"No '{prefix}' experiment yet. Run challenge 4 first.")
+    n, scores = experiment_scores(client, exps[-1].name)
+    baseline = {
+        "experiment": exps[-1].name,
+        "dataset_version": DATASET_TAG,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "scores": {k: round(scores[k], 3) for k in GATE_KEYS if k in scores},
+    }
+    BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = BASELINE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(baseline, indent=2) + "\n")
+    os.chmod(tmp, 0o666)
+    os.replace(tmp, BASELINE_FILE)
+    print(json.dumps(baseline, indent=2))

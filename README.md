@@ -1,8 +1,11 @@
 # Evaluation-Driven Development with LangSmith: companion notebooks
 
 The notebooks from the **Evaluation-Driven Development with LangSmith** workshop, runnable on your
-own machine. You evaluate one order-support agent: build a dataset, run offline evals, score
-single steps and tool-call trajectories, analyze the errors, and fix the agent with the results.
+own machine. You evaluate one internal assistant that answers questions from a knowledge base and
+works with tickets: build a versioned dataset, run offline evals, score groundedness and tool use,
+analyze the failures, fix the agent, and turn the comparison into a pre-release gate you can run in CI.
+
+All data is synthetic.
 
 Everything you create (dataset, experiments, traces) lives in your own LangSmith workspace.
 
@@ -30,7 +33,7 @@ A 403 mentioning "explicit agent creation" means this workspace won't work. Use 
 ## Setup
 
 ```bash
-git clone <this repo> && cd eval-driven-development-langsmith
+git clone <this repo> && cd eval-driven-development-langsmith-companion
 cp .env.example .env          # add ANTHROPIC_API_KEY
 uv sync
 uv run jupyter lab notebooks/
@@ -44,15 +47,19 @@ both in `.env`.
 
 | # | Notebook | What it covers |
 |---|----------|----------------|
-| 1 | `01_setup_and_baseline` | Connect LangSmith, meet the agent, capture a baseline trace |
-| 2 | `02_your_first_offline_eval` | Datasets, target functions, evaluators, `client.evaluate()` |
-| 3 | `03_single_step_evals` | Score one decision (`tool_selection`); LLM-as-judge |
-| 4 | `04_trajectory_evals` | Score tool-call sequences (`exact_match`, `extra_steps`, `missing_steps`, `in_order`) |
-| 5 | `05_the_eval_driven_loop` | Error analysis, change one thing, compare experiments |
+| 1 | `01_setup_and_baseline` | Connect LangSmith, meet the assistant, capture a baseline trace |
+| 2 | `02_versioned_dataset_first_eval` | Build and tag a dataset version, target functions, `client.evaluate()` |
+| 3 | `03_groundedness_and_tool_evals` | LLM-as-judge groundedness, tool selection, error analysis |
+| 4 | `04_fix_and_compare` | Change one thing, rerun on the same dataset version, compare experiments |
+| 5 | `05_ci_gate` | A regression gate: baseline, tolerance, exit code, results file |
 
-The agent (`eval_lab/agent.py`) has four tools over in-memory data and starts with a deliberately
-flawed system prompt: it issues refunds without checking eligibility. Whether your model shows the
-flaw varies by run, so trust the tables your own evals print.
+The agent (`eval_lab/agent.py`) has three tools over in-memory data and starts with a deliberately
+flawed system prompt: a partly out-of-date "quick reference" that tells it to answer without
+searching the knowledge base. Whether your model shows the flaw varies by run, so trust the tables
+your own evals print.
+
+Notebook 5 runs `ci/run_evals.py`, which writes `ci/baseline.json` and `ci_results/*.json`.
+Both are generated when you run it.
 
 ## Differences from the workshop
 
@@ -79,8 +86,8 @@ Set `AGENT_MODEL` and `JUDGE_MODEL` in `.env` as `provider:model`, for example
 The code and notebooks are generated from the workshop's Instruqt track:
 
 ```bash
-python tools/export_from_track.py /path/to/eval-driven-development-langsmith
+python tools/export_from_track.py /path/to/track
 ```
 
 `README.md`, `pyproject.toml`, `.env.example`, `utils/models.py` and `tools/` are hand-written and
-are not overwritten.
+are not overwritten. Notebooks from earlier versions of the track are removed.

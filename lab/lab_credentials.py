@@ -136,7 +136,7 @@ def collect():
     label = _slugify(input("Short name or initials for your project (e.g. jdoe): "))
     project = _project_name(label)
     updates["LANGSMITH_PROJECT"] = project
-    # Names the dataset (order-support-<label>), so every notebook finds the same one.
+    # Names the dataset (internal-assistant-<label>), so every notebook finds the same one.
     updates["WORKSHOP_SFX"] = label or "local"
 
     blocked = probe_tracing(ls_key, endpoint, project)

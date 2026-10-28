@@ -51,13 +51,13 @@ if _ROOT not in sys.path:
 
 # --- eval_lab -------------------------------------------------------------
 agent = heredoc("AGENTEOF")
-agent = swap(agent, "import json\nimport sys\n", "import json\nimport sys\nfrom pathlib import Path\n", "agent imports")
+agent = swap(agent, "import re\nimport sys\n", "import re\nimport sys\nfrom pathlib import Path\n", "agent imports")
 agent = swap(agent, ROOT_HACK, NEW_HACK, "agent path")
 write("eval_lab/__init__.py", "")
 write("eval_lab/agent.py", agent)
 
 evals = heredoc("EVALSEOF")
-evals = swap(evals, "import sys\nfrom collections import Counter\n", "import sys\nfrom collections import Counter\nfrom pathlib import Path\n", "evaluators imports")
+evals = swap(evals, "import sys\n\nfor _p", "import sys\nfrom pathlib import Path\n\nfor _p", "evaluators imports")
 evals = swap(evals, ROOT_HACK, NEW_HACK, "evaluators path")
 write("eval_lab/evaluators.py", evals)
 write("utils/__init__.py", "")
@@ -76,19 +76,52 @@ cred = swap(cred, '''    sfx = os.environ.get("WORKSHOP_SFX", "")
     return os.environ["LANGSMITH_PROJECT"]''', '''    base = os.environ.get("WORKSHOP_PROJECT_BASE", "eval-driven-dev")
     return f"{base}-{label}" if label else base''', "cred project name")
 cred = swap(cred, '    updates["LANGSMITH_PROJECT"] = project\n',
-            '    updates["LANGSMITH_PROJECT"] = project\n    # Names the dataset (order-support-<label>), so every notebook finds the same one.\n    updates["WORKSHOP_SFX"] = label or "local"\n', "cred sfx")
+            '    updates["LANGSMITH_PROJECT"] = project\n    # Names the dataset (internal-assistant-<label>), so every notebook finds the same one.\n    updates["WORKSHOP_SFX"] = label or "local"\n', "cred sfx")
 cred = swap(cred, '    os.environ["LANGSMITH_ENDPOINT"] = endpoint\n',
             '    os.environ["LANGSMITH_ENDPOINT"] = endpoint\n    os.environ["WORKSHOP_SFX"] = label or "local"\n', "cred env sfx")
 write("lab/lab_credentials.py", cred)
 write("lab/lab_trace.py", heredoc("TRACEEOF").replace("this sandbox's", "this run's").replace("in the sandbox", "in your environment"))
-write("lab/lab_eval.py", heredoc("LABEVALEOF").replace("Per-sandbox dataset name, so a shared workspace never collides.", "Dataset name, per project label, so a shared workspace never collides."))
+labeval = swap(heredoc("LABEVALEOF"), 'BASELINE_FILE = Path("/opt/workshop/ci/baseline.json")', 'BASELINE_FILE = Path(__file__).resolve().parents[1] / "ci" / "baseline.json"', "baseline path")
+write("lab/lab_eval.py", labeval.replace("Per-sandbox dataset name, so a shared workspace never collides.", "Dataset name, per project label, so a shared workspace never collides."))
+
+# --- CI gate script ---------------------------------------------------------
+ci = heredoc("CIEOF")
+ci = swap(ci, '''sys.path.insert(0, "/opt/workshop")
+sys.path.insert(0, "/opt/workshop/instruqt")
+''', '''sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lab"))
+''', "ci path")
+ci = swap(ci, 'load_dotenv("/opt/workshop/.env", override=True)', 'load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)', "ci env")
+write("ci/run_evals.py", ci)
+os.chmod(ROOT / "ci" / "run_evals.py", 0o755)
 
 # --- notebooks ----------------------------------------------------------------
 solutions = eval(re.search(r"SOLUTIONS = (\{.*?\n\})\n", heredoc("FILLEOF"), re.S).group(1))
 gen = heredoc("GENEOF")
 nbdir = ROOT / "notebooks"
 nbdir.mkdir(exist_ok=True)
+for old in nbdir.glob("*.ipynb"):  # drop notebooks from earlier track versions
+    old.unlink()
 subprocess.run([sys.executable, "-I", "-c", gen], check=True, env={**os.environ, "NB_OUT": str(nbdir)}, stdout=subprocess.DEVNULL)
+
+GH_ACTIONS = """```yaml
+on: pull_request
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install langsmith langchain langchain-anthropic python-dotenv
+      - run: python ci/run_evals.py --change none   # non-zero exit fails the job
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: ci_results, path: ci_results/}   # keep the record for every run
+```"""
 
 VERIFY = '''import os
 from dotenv import load_dotenv
@@ -113,6 +146,13 @@ for f in sorted(nbdir.glob("*.ipynb")):
         if cell["cell_type"] == "code":
             src = src.replace('("/root/workshop", "/root/workshop/instruqt")', '("..", "../lab")')
             src = src.replace('load_dotenv("/root/workshop/.env", override=True)', 'load_dotenv("../.env", override=True)')
+            src = src.replace("/opt/workshop/ci_results", "../ci_results").replace("/opt/workshop/ci/", "../ci/")
+            m = re.fullmatch(r"%%bash\n/opt/workshop/\.venv/bin/python \.\./ci/run_evals\.py --change (\S+)\necho exit code: \$\?", src)
+            if m:
+                src = ("import subprocess, sys\n\n"
+                       f"r = subprocess.run([sys.executable, \"../ci/run_evals.py\", \"--change\", \"{m.group(1)}\"], capture_output=True, text=True)\n"
+                       "print(r.stdout + r.stderr)\n"
+                       "print(\"exit code:\", r.returncode)")
             src = src.replace("from lab_state import mark_done\n", "").replace('mark_done("/tmp/.baseline-ok")\n', "")
             if "verify_connection.py" in src:
                 src = VERIFY
@@ -126,6 +166,12 @@ for f in sorted(nbdir.glob("*.ipynb")):
             src = src.replace("## Your turn:", "## ")
             src = re.sub(r"Paste (this|the code|it) into the blank cell( below)?", "The next cell holds this code", src)
             src = re.sub(r"\n*(---\n+)?Click \*\*Check\*\*[^\n]*", "", src).rstrip()
+            src = src.replace("`/opt/workshop/ci/run_evals.py` is provided.", "`ci/run_evals.py` is provided.")
+            src = src.replace("For a regulated business that is the failure that matters", "For a business that has to trust its answers that is the failure that matters")
+            src = src.replace("## 7. Wire it into GitLab", "## 7. Wire it into CI")
+            src = src.replace("A GitLab CI job is the same command. A sketch of `.gitlab-ci.yml` (not run here):", "A CI job is the same command. A sketch of a GitHub Actions workflow (not run here):")
+            src = src.replace("Set `LANGSMITH_API_KEY` as a masked CI/CD variable.", "Set `LANGSMITH_API_KEY` as a repository secret.")
+            src = re.sub(r"```yaml\neval-gate:.*?```", GH_ACTIONS, src, flags=re.S)
             src = src.replace("`judge_model` is Claude Haiku on Bedrock.", "`judge_model` is the small, cheap model set by `JUDGE_MODEL`.")
         cell["source"] = src.splitlines(keepends=True)
         cell.setdefault("metadata", {}).pop("tags", None) if cell["cell_type"] == "code" else None
